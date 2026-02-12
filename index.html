@@ -1,0 +1,389 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Upload, FileText, CheckCircle, XCircle, AlertTriangle, RefreshCw, Calculator, Award, ChevronRight, File, Loader } from 'lucide-react';
+
+// --- 1. Dynamic Script Loader (Mammoth.js) ---
+// ใช้สำหรับอ่านไฟล์ .docx ใน Browser โดยไม่ต้องส่งไฟล์ไป Server
+const useMammothLoader = () => {
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  useEffect(() => {
+    if (window.mammoth) {
+      setIsLoaded(true);
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js";
+    script.async = true;
+    script.onload = () => setIsLoaded(true);
+    document.body.appendChild(script);
+
+    return () => {
+      // Cleanup not strictly necessary for single usage, but good practice
+    };
+  }, []);
+
+  return isLoaded;
+};
+
+// --- 2. Knowledge Base (Chapter 6 Formulas) ---
+const KNOWLEDGE_BASE = {
+  halstead: {
+    formula_N: "N = N1 + N2",
+    formula_N_hat: "N^ = u1 * log2(u1) + u2 * log2(u2)"
+  },
+  fp: {
+    formula_TCF: "TCF = 0.65 + (0.01 * VAF)",
+    formula_FP: "FP = UFP * TCF"
+  },
+  cocomo: {
+    organic: { a: 2.4, b: 1.05, c: 2.5, d: 0.38 },
+    semi: { a: 3.0, b: 1.12, c: 2.5, d: 0.35 },
+    embedded: { a: 3.6, b: 1.20, c: 2.5, d: 0.32 }
+  }
+};
+
+// --- 3. Parsing Logic (The "AI" Reader) ---
+const parseDocContent = (text) => {
+  const extracted = {};
+
+  // Normalize text: remove extra spaces, fix common OCR/Typo issues
+  const cleanText = text.replace(/\s+/g, ' '); 
+
+  // Helper Regex
+  const findVal = (patterns) => {
+    for (let p of patterns) {
+      const match = cleanText.match(p);
+      if (match) return parseFloat(match[1]);
+    }
+    return null;
+  };
+  
+  const findText = (patterns) => {
+    for (let p of patterns) {
+      const match = cleanText.match(p);
+      if (match) return match[1];
+    }
+    return null;
+  };
+
+  // --- Halstead Extraction ---
+  extracted.n1 = findVal([/N1\s*[=:]\s*(\d+)/i, /N_1\s*[=:]\s*(\d+)/i, /Operators\s*count\s*(\d+)/i]);
+  extracted.n2 = findVal([/N2\s*[=:]\s*(\d+)/i, /N_2\s*[=:]\s*(\d+)/i, /Operands\s*count\s*(\d+)/i]);
+  extracted.mu1 = findVal([/mu1\s*[=:]\s*(\d+)/i, /u1\s*[=:]\s*(\d+)/i]);
+  extracted.mu2 = findVal([/mu2\s*[=:]\s*(\d+)/i, /u2\s*[=:]\s*(\d+)/i]);
+  extracted.N = findVal([/Program\s*Length\s*\(?N\)?\s*[=:]\s*(\d+)/i, /N\s*[=:]\s*(\d+)/]);
+  
+  // --- FP Extraction ---
+  extracted.ufp = findVal([/UFP\s*(?:Count)?\s*[=:]?\s*(\d+)/i, /Unadjusted\s*Function\s*Point\s*[=:]\s*(\d+)/i]);
+  extracted.vaf = findVal([/VAF\s*\(?Total\)?\s*[=:]?\s*(\d+)/i]);
+  extracted.fp = findVal([/FP\s*[=:]\s*([\d.]+)/i]);
+
+  // --- COCOMO Extraction ---
+  extracted.kloc = findVal([/(\d+)\s*KLOC/i, /Size\s*[=:]\s*(\d+)/i]);
+  extracted.type = findText([/(Organic)/i, /(Semi-detached)/i, /(Embedded)/i]);
+  extracted.effort = findVal([/Effort\s*[=:]\s*([\d.]+)/i, /แรงงาน\s*[=:]\s*([\d.]+)/]);
+  extracted.time = findVal([/Time\s*[=:]\s*([\d.]+)/i, /ระยะเวลา\s*[=:]\s*([\d.]+)/]);
+
+  return extracted;
+};
+
+// --- 4. Grading Logic (The "AI" Grader) ---
+const gradeSubmission = (data) => {
+  let score = 0;
+  let maxScore = 0;
+  const feedback = [];
+
+  // --- Grade Halstead ---
+  if (data.n1 !== null && data.n2 !== null && data.N !== null) {
+    maxScore += 20;
+    const calcN = data.n1 + data.n2;
+    if (Math.abs(calcN - data.N) <= 1) {
+      score += 20;
+      feedback.push({ section: 'Halstead', status: 'pass', msg: `คำนวณ N ถูกต้อง (${data.n1} + ${data.n2} = ${data.N})` });
+    } else {
+      feedback.push({ section: 'Halstead', status: 'fail', msg: `คำนวณ N ผิดพลาด (นักศึกษาตอบ ${data.N} แต่สูตร N1+N2 ได้ ${calcN})` });
+    }
+  } else {
+    feedback.push({ section: 'Halstead', status: 'info', msg: 'ไม่พบข้อมูลครบถ้วนสำหรับตรวจ (ต้องการ N1, N2, N)' });
+  }
+
+  // --- Grade FP ---
+  if (data.ufp !== null && data.vaf !== null && data.fp !== null) {
+    maxScore += 30;
+    const calcTCF = 0.65 + (0.01 * data.vaf);
+    const calcFP = data.ufp * calcTCF;
+    
+    // Allow 1.0 margin of error
+    if (Math.abs(calcFP - data.fp) <= 1.5) {
+      score += 30;
+      feedback.push({ section: 'Function Point', status: 'pass', msg: `คำนวณ FP ถูกต้อง (UFP ${data.ufp} x TCF ${calcTCF.toFixed(2)})` });
+    } else {
+      score += 10; // Partial score for attempt
+      feedback.push({ section: 'Function Point', status: 'fail', msg: `คำนวณ FP คลาดเคลื่อน (ตอบ ${data.fp} ค่าที่ถูกคือ ~${calcFP.toFixed(2)})` });
+    }
+  } else {
+    feedback.push({ section: 'Function Point', status: 'info', msg: 'ไม่พบข้อมูลครบถ้วนสำหรับตรวจ FP' });
+  }
+
+  // --- Grade COCOMO ---
+  if (data.kloc !== null && data.type && data.effort !== null) {
+    maxScore += 30;
+    let coeffs = KNOWLEDGE_BASE.cocomo.organic; // Default
+    const typeKey = data.type.toLowerCase();
+    
+    if (typeKey.includes('semi')) coeffs = KNOWLEDGE_BASE.cocomo.semi;
+    else if (typeKey.includes('embedded')) coeffs = KNOWLEDGE_BASE.cocomo.embedded;
+
+    const calcEffort = coeffs.a * Math.pow(data.kloc, coeffs.b);
+    
+    // Allow 2.0 margin of error for complex powers
+    if (Math.abs(calcEffort - data.effort) <= 2.0) {
+      score += 30;
+      feedback.push({ section: 'COCOMO', status: 'pass', msg: `คำนวณ Effort ถูกต้องสำหรับ ${data.type} (${data.kloc} KLOC)` });
+    } else {
+      score += 10;
+      feedback.push({ section: 'COCOMO', status: 'fail', msg: `คำนวณ Effort ไม่ตรงสูตร (ตอบ ${data.effort} ค่าที่ถูกคือ ~${calcEffort.toFixed(2)})` });
+    }
+  } else {
+    feedback.push({ section: 'COCOMO', status: 'info', msg: 'ไม่พบข้อมูลครบถ้วนสำหรับตรวจ COCOMO' });
+  }
+
+  const finalScore = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+  return { score: finalScore, feedback, maxScore, totalPoints: score };
+};
+
+
+// --- UI Components ---
+
+const DocxUploader = ({ onFileProcessed }) => {
+  const isMammothReady = useMammothLoader();
+  const fileInputRef = useRef(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleFileChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (!file.name.endsWith('.docx')) {
+      setError('กรุณาอัปโหลดไฟล์ .docx เท่านั้น');
+      return;
+    }
+
+    if (!isMammothReady) {
+      setError('ระบบกำลังโหลดไลบรารี กรุณาลองใหม่ในอีกสักครู่');
+      return;
+    }
+
+    setIsProcessing(true);
+    setError(null);
+
+    const reader = new FileReader();
+    reader.onload = function(event) {
+      const arrayBuffer = event.target.result;
+      
+      // Use Mammoth to extract text
+      window.mammoth.extractRawText({ arrayBuffer: arrayBuffer })
+        .then(function(result) {
+          const text = result.value;
+          onFileProcessed(text, file.name);
+          setIsProcessing(false);
+        })
+        .catch(function(err) {
+          console.error(err);
+          setError('เกิดข้อผิดพลาดในการอ่านไฟล์ DOCX');
+          setIsProcessing(false);
+        });
+    };
+    reader.readAsArrayBuffer(file);
+  };
+
+  return (
+    <div className="bg-white p-8 rounded-xl shadow-sm border-2 border-dashed border-indigo-200 text-center transition-all hover:border-indigo-400">
+      <div className="mx-auto w-16 h-16 bg-indigo-50 rounded-full flex items-center justify-center mb-4">
+        {isProcessing ? <Loader className="animate-spin text-indigo-600" /> : <File className="text-indigo-600" size={32} />}
+      </div>
+      
+      <h3 className="text-lg font-bold text-gray-800 mb-2">อัปโหลดการบ้าน (.docx)</h3>
+      <p className="text-gray-500 mb-6 text-sm">
+        ระบบจะใช้ AI Logic อ่านเนื้อหาในไฟล์ Word และตรวจคำตอบตามสูตรบทที่ 6 อัตโนมัติ
+      </p>
+
+      <input 
+        type="file" 
+        ref={fileInputRef}
+        onChange={handleFileChange}
+        accept=".docx"
+        className="hidden" 
+      />
+
+      <button 
+        onClick={() => fileInputRef.current.click()}
+        disabled={isProcessing || !isMammothReady}
+        className="px-6 py-3 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 mx-auto shadow-md hover:shadow-lg transition-all"
+      >
+        {isProcessing ? 'กำลังวิเคราะห์...' : 'เลือกไฟล์จากเครื่อง'}
+      </button>
+
+      {error && (
+        <div className="mt-4 text-red-500 text-sm bg-red-50 p-2 rounded flex items-center justify-center gap-2">
+          <AlertTriangle size={16} /> {error}
+        </div>
+      )}
+      
+      {!isMammothReady && (
+        <p className="mt-2 text-xs text-orange-400">กำลังเตรียมระบบอ่านไฟล์...</p>
+      )}
+    </div>
+  );
+};
+
+const GradingDashboard = ({ fileName, extractedData, report, onReset }) => {
+  return (
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+          <FileText className="text-indigo-600" />
+          ผลการตรวจ: {fileName}
+        </h2>
+        <button onClick={onReset} className="text-sm text-gray-500 hover:text-indigo-600 underline">
+          ตรวจไฟล์อื่น
+        </button>
+      </div>
+
+      {/* Score Card */}
+      <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 rounded-xl text-white p-6 shadow-lg flex items-center justify-between">
+        <div>
+          <div className="text-indigo-100 text-sm font-medium mb-1">GRADE SCORE</div>
+          <div className="text-5xl font-bold">{report.score}<span className="text-2xl opacity-60">/100</span></div>
+          <p className="text-indigo-200 text-xs mt-2 flex items-center gap-1">
+            <Award size={14} /> อิงตามความถูกต้องของการคำนวณสูตร (Consistency)
+          </p>
+        </div>
+        <div className="bg-white/10 p-4 rounded-lg backdrop-blur-sm text-right">
+          <div className="text-sm opacity-80">Points Earned</div>
+          <div className="text-2xl font-bold">{report.totalPoints} / {report.maxScore}</div>
+        </div>
+      </div>
+
+      {/* Analysis Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Left: Extracted Data */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 font-semibold text-gray-700 flex items-center gap-2">
+            <FileText size={16} /> ข้อมูลที่พบในไฟล์ (Extracted)
+          </div>
+          <div className="p-4 space-y-4">
+            <div>
+              <div className="text-xs font-bold text-gray-400 uppercase mb-1">Halstead</div>
+              <div className="grid grid-cols-3 gap-2 text-sm bg-gray-50 p-2 rounded">
+                <div><span className="text-gray-500">N1:</span> {extractedData.n1 || '-'}</div>
+                <div><span className="text-gray-500">N2:</span> {extractedData.n2 || '-'}</div>
+                <div><span className="text-gray-500">N:</span> <strong>{extractedData.N || '-'}</strong></div>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-bold text-gray-400 uppercase mb-1">Function Point</div>
+              <div className="grid grid-cols-3 gap-2 text-sm bg-gray-50 p-2 rounded">
+                <div><span className="text-gray-500">UFP:</span> {extractedData.ufp || '-'}</div>
+                <div><span className="text-gray-500">VAF:</span> {extractedData.vaf || '-'}</div>
+                <div><span className="text-gray-500">FP:</span> <strong>{extractedData.fp || '-'}</strong></div>
+              </div>
+            </div>
+            <div>
+              <div className="text-xs font-bold text-gray-400 uppercase mb-1">COCOMO</div>
+              <div className="grid grid-cols-2 gap-2 text-sm bg-gray-50 p-2 rounded">
+                <div><span className="text-gray-500">Type:</span> {extractedData.type || '-'}</div>
+                <div><span className="text-gray-500">Effort:</span> <strong>{extractedData.effort || '-'}</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Feedback */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 font-semibold text-gray-700 flex items-center gap-2">
+            <CheckCircle size={16} /> รายงานผลการตรวจสอบ (Feedback)
+          </div>
+          <div className="p-4 space-y-3 max-h-[300px] overflow-y-auto">
+            {report.feedback.length > 0 ? report.feedback.map((item, idx) => (
+              <div key={idx} className={`flex gap-3 p-3 rounded-lg border text-sm ${
+                item.status === 'pass' ? 'bg-green-50 border-green-100' : 
+                item.status === 'fail' ? 'bg-red-50 border-red-100' : 'bg-gray-50 border-gray-100'
+              }`}>
+                <div className="shrink-0 mt-0.5">
+                  {item.status === 'pass' && <CheckCircle className="text-green-600" size={18} />}
+                  {item.status === 'fail' && <XCircle className="text-red-600" size={18} />}
+                  {item.status === 'info' && <AlertTriangle className="text-gray-400" size={18} />}
+                </div>
+                <div>
+                  <div className={`font-bold ${
+                    item.status === 'pass' ? 'text-green-800' : 
+                    item.status === 'fail' ? 'text-red-800' : 'text-gray-600'
+                  }`}>{item.section}</div>
+                  <div className="text-gray-600">{item.msg}</div>
+                </div>
+              </div>
+            )) : (
+              <div className="text-center text-gray-400 py-8">ไม่พบข้อมูลที่สามารถตรวจได้</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const App = () => {
+  const [step, setStep] = useState(1);
+  const [fileData, setFileData] = useState(null);
+  const [gradingReport, setGradingReport] = useState(null);
+
+  const processFile = (text, fileName) => {
+    // 1. Parse Text
+    const extracted = parseDocContent(text);
+    
+    // 2. Grade Logic
+    const report = gradeSubmission(extracted);
+
+    setFileData({ fileName, extracted });
+    setGradingReport(report);
+    setStep(2);
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-100 font-sans text-slate-800 p-4 md:p-8">
+      <div className="max-w-5xl mx-auto">
+        <header className="mb-8">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="bg-indigo-600 text-white p-2.5 rounded-lg shadow-lg shadow-indigo-200">
+              <Calculator size={28} />
+            </div>
+            <h1 className="text-2xl md:text-3xl font-bold text-slate-900">
+              SE Chapter 6: Smart Auto-Grader
+            </h1>
+          </div>
+          <p className="text-slate-500 ml-14 max-w-2xl">
+            ระบบตรวจการบ้านอัตโนมัติรองรับไฟล์ .docx โดยใช้อัลกอริทึมตรวจสอบความถูกต้องของการคำนวณตามสูตร Halstead, Function Point และ COCOMO
+          </p>
+        </header>
+
+        {step === 1 && <DocxUploader onFileProcessed={processFile} />}
+        
+        {step === 2 && fileData && gradingReport && (
+          <GradingDashboard 
+            fileName={fileData.fileName}
+            extractedData={fileData.extracted}
+            report={gradingReport}
+            onReset={() => { setStep(1); setFileData(null); setGradingReport(null); }}
+          />
+        )}
+
+      </div>
+    </div>
+  );
+};
+
+export default App;
+
